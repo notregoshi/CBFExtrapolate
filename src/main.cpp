@@ -661,6 +661,23 @@ class $modify(MyBGL, GJBaseGameLayer) {
     float xSign = (hasObj && m_objectLayer->getScaleX() < 0) ? -1 : 1;
     bool dead = m_playerDied;
 
+    // How far the render sample sits ahead of the last executed physics step, in game seconds. Long explaination below :
+    // getModifiedDelta() steps the game in whole quanta of min(timeWarp, 1) / 240 seconds and carries the un-simulated remainder in m_extraDelta, so after this frame's steps the simulated time is `m_extraDelta` behind the game clock (the clock only advances when the next frame's dt arrives, so it still reads the start of this frame). Stepping by that remainder alone would land exactly on the game clock, the start of this frame (and would go negative whenever the engine rounded up), so half a quantum (1/480 sec at normal speed) is added. The sample then advances by exactly one display interval per frame no matter how many steps ran, which is what removes the stutter at refresh rates that aren't factors or multiples of 240.
+    auto renderAdvanceSeconds = [&]() -> double {
+      double timeWarp = std::isfinite(m_gameState.m_timeWarp) ? m_gameState.m_timeWarp : 1.0;
+      if (timeWarp <= 0.0) {
+        timeWarp = 1.0;
+      }
+      double quantum = std::min(timeWarp, 1.0) / 240.0;
+      double advance = m_extraDelta + 0.5 * quantum;
+      if (!std::isfinite(advance) || advance < 0.0) {
+        advance = 0.0;
+      } else if (advance > quantum) {
+        advance = quantum;
+      }
+      return advance;
+    };
+
     auto extrapolatePlayer =
         [&](PlayerObject *player, PlayerState &state,
             const std::vector<PlayerButtonCommand> &pendingClicks,
@@ -693,70 +710,66 @@ class $modify(MyBGL, GJBaseGameLayer) {
           double targetTime = state.lastTime + dtSeconds;
           state.isDead = false;
 
+          // one step right before the game render, exactly to the segment that ends at the next input (or at the render sample)
           auto updatePlayerSubstepped = [&](double dtFrames) {
-            double remaining = dtFrames;
-            double stepSize = 0.25;
-
-            while (remaining > 0.0) {
-              double currentStep = std::min(remaining, stepSize);
-              float delta = static_cast<float>(currentStep);
-
-              m_fields->m_enableSolidCollisions = true;
-
-              player->m_playEffects = false;
-
-              if (player->m_collisionLogTop)
-                player->m_collisionLogTop->removeAllObjects();
-              if (player->m_collisionLogBottom)
-                player->m_collisionLogBottom->removeAllObjects();
-              if (player->m_collisionLogLeft)
-                player->m_collisionLogLeft->removeAllObjects();
-              if (player->m_collisionLogRight)
-                player->m_collisionLogRight->removeAllObjects();
-
-              int origNoAutoJump = player->m_stateNoAutoJump;
-              int origDartSlide = player->m_stateDartSlide;
-              int origHitHead = player->m_stateHitHead;
-              int origFlipGravity = player->m_stateFlipGravity;
-
-              player->update(delta);
-
-              player->m_stateNoAutoJump = origNoAutoJump;
-              player->m_stateDartSlide = origDartSlide;
-              player->m_stateHitHead = origHitHead;
-              player->m_stateFlipGravity = origFlipGravity;
-
-              float yBefore = player->getPositionY();
-              double yVelBefore = player->m_yVelocity;
-              m_fields->m_teleportYOffset = 0.0;
-
-              this->checkCollisions(player, delta, true);
-              phys::checkSpawnObjects(this, player);
-              if (!player->m_isOnSlope && player->m_stateDartSlide <= 0) {
-                float yAfter = player->getPositionY();
-                float pushOutY = yAfter - yBefore - m_fields->m_teleportYOffset;
-
-                if (player->m_lastCollisionLeft > 0 ||
-                    player->m_lastCollisionRight > 0) {
-                  if (pushOutY > 0.01f && yVelBefore > 0.05) {
-                    float targetY = yBefore + m_fields->m_teleportYOffset;
-                    player->setPositionY(targetY);
-                    player->m_position.y = targetY;
-                    player->m_yVelocity = yVelBefore;
-                  } else if (pushOutY < -0.01f && yVelBefore < -0.05) {
-                    float targetY = yBefore + m_fields->m_teleportYOffset;
-                    player->setPositionY(targetY);
-                    player->m_position.y = targetY;
-                    player->m_yVelocity = yVelBefore;
-                  }
-                }
-              }
-
-              player->m_isDead = false;
-              remaining -= currentStep;
+            if (dtFrames <= 0.0) {
+              return;
             }
 
+            float delta = static_cast<float>(dtFrames);
+
             m_fields->m_enableSolidCollisions = true;
+
+            player->m_playEffects = false;
+
+            if (player->m_collisionLogTop)
+              player->m_collisionLogTop->removeAllObjects();
+            if (player->m_collisionLogBottom)
+              player->m_collisionLogBottom->removeAllObjects();
+            if (player->m_collisionLogLeft)
+              player->m_collisionLogLeft->removeAllObjects();
+            if (player->m_collisionLogRight)
+              player->m_collisionLogRight->removeAllObjects();
+
+            int origNoAutoJump = player->m_stateNoAutoJump;
+            int origDartSlide = player->m_stateDartSlide;
+            int origHitHead = player->m_stateHitHead;
+            int origFlipGravity = player->m_stateFlipGravity;
+
+            player->update(delta);
+
+            player->m_stateNoAutoJump = origNoAutoJump;
+            player->m_stateDartSlide = origDartSlide;
+            player->m_stateHitHead = origHitHead;
+            player->m_stateFlipGravity = origFlipGravity;
+
+            float yBefore = player->getPositionY();
+            double yVelBefore = player->m_yVelocity;
+            m_fields->m_teleportYOffset = 0.0;
+
+            this->checkCollisions(player, delta, true);
+            phys::checkSpawnObjects(this, player);
+            if (!player->m_isOnSlope && player->m_stateDartSlide <= 0) {
+              float yAfter = player->getPositionY();
+              float pushOutY = yAfter - yBefore - m_fields->m_teleportYOffset;
+
+              if (player->m_lastCollisionLeft > 0 ||
+                  player->m_lastCollisionRight > 0) {
+                if (pushOutY > 0.01f && yVelBefore > 0.05) {
+                  float targetY = yBefore + m_fields->m_teleportYOffset;
+                  player->setPositionY(targetY);
+                  player->m_position.y = targetY;
+                  player->m_yVelocity = yVelBefore;
+                } else if (pushOutY < -0.01f && yVelBefore < -0.05) {
+                  float targetY = yBefore + m_fields->m_teleportYOffset;
+                  player->setPositionY(targetY);
+                  player->m_position.y = targetY;
+                  player->m_yVelocity = yVelBefore;
+                }
+              }
+            }
+
+            player->m_isDead = false;
           };
 
           for (const auto &cmd : sortedClicks) {
@@ -791,7 +804,6 @@ class $modify(MyBGL, GJBaseGameLayer) {
     if (hasP1 && m_fields->m_fakePlayer1) {
       auto &state = m_fields->p1;
       if (state.lastTime != 0 && !dead) {
-        double tCurrent = getCurrentTimestamp();
         double timeScale = m_gameState.m_timeWarp;
         if (state.prevTime > 0.0001 && state.lastTime > state.prevTime &&
             state.lastDt > 0.0001f) {
@@ -803,14 +815,8 @@ class $modify(MyBGL, GJBaseGameLayer) {
         if (!std::isfinite(timeScale) || timeScale <= 0.0) {
           timeScale = 1.0;
         }
-        double dtSeconds = tCurrent - state.lastTime;
-        if (dtSeconds < 0.0) {
-          dtSeconds = 0.0;
-        }
-        double maxDtSeconds = (0.25 / 60.0) / timeScale;
-        if (dtSeconds > maxDtSeconds) {
-          dtSeconds = maxDtSeconds;
-        }
+
+        double dtSeconds = renderAdvanceSeconds() / timeScale;
         double tCurrentClamped = state.lastTime + dtSeconds;
 
         if (dtSeconds >= 0.0 && dtSeconds < 2.0) {
@@ -852,7 +858,6 @@ class $modify(MyBGL, GJBaseGameLayer) {
     if (hasP2 && m_fields->m_fakePlayer2 && m_gameState.m_isDualMode) {
       auto &state = m_fields->p2;
       if (state.lastTime != 0 && !dead) {
-        double tCurrent = getCurrentTimestamp();
         double timeScale = m_gameState.m_timeWarp;
         if (state.prevTime > 0.0001 && state.lastTime > state.prevTime &&
             state.lastDt > 0.0001f) {
@@ -864,14 +869,8 @@ class $modify(MyBGL, GJBaseGameLayer) {
         if (!std::isfinite(timeScale) || timeScale <= 0.0) {
           timeScale = 1.0;
         }
-        double dtSeconds = tCurrent - state.lastTime;
-        if (dtSeconds < 0.0) {
-          dtSeconds = 0.0;
-        }
-        double maxDtSeconds = (0.25 / 60.0) / timeScale;
-        if (dtSeconds > maxDtSeconds) {
-          dtSeconds = maxDtSeconds;
-        }
+
+        double dtSeconds = renderAdvanceSeconds() / timeScale;
         double tCurrentClamped = state.lastTime + dtSeconds;
 
         if (dtSeconds >= 0.0 && dtSeconds < 2.0) {
@@ -914,33 +913,13 @@ class $modify(MyBGL, GJBaseGameLayer) {
     CameraState camState;
 
     if (hasObj && !dead && hasP1 && m_fields->p1.lastTime != 0) {
-      double tCurrent = getCurrentTimestamp();
-      double timeScale = m_gameState.m_timeWarp;
-      if (m_fields->p1.prevTime > 0.0001 &&
-          m_fields->p1.lastTime > m_fields->p1.prevTime &&
-          m_fields->p1.lastDt > 0.0001f) {
-        double diff = m_fields->p1.lastTime - m_fields->p1.prevTime;
-        if (diff > 0.001) {
-          timeScale = (m_fields->p1.lastDt / 60.0f) / diff;
-        }
-      }
-      if (!std::isfinite(timeScale) || timeScale <= 0.0) {
-        timeScale = 1.0;
-      }
-      double dtSeconds = tCurrent - m_fields->p1.lastTime;
-      if (dtSeconds < 0.0) {
-        dtSeconds = 0.0;
-      }
-      double maxDtSeconds = (0.25 / 60.0) / timeScale;
-      if (dtSeconds > maxDtSeconds) {
-        dtSeconds = maxDtSeconds;
-      }
+      double advanceSeconds = renderAdvanceSeconds();
 
-      if (dtSeconds >= 0.0 && dtSeconds < 2.0) {
+      if (advanceSeconds > 0.0) {
         camState = saveCameraState();
         cameraExtrapolated = true;
 
-        double warpedDt = dtSeconds * timeScale;
+        double warpedDt = advanceSeconds;
         float dtFloat = static_cast<float>(warpedDt);
 
         gd::unordered_map<int, GJValueTween> filteredTweens;
