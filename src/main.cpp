@@ -1,4 +1,5 @@
 #include "bot/bot.hpp"
+#include "linux-workaround/early-input.hpp"
 #include "physics/collisions.hpp"
 #include "physics/gjbasegamelayer.hpp"
 #include "physics/player.hpp"
@@ -21,18 +22,12 @@ using namespace geode::prelude;
 static bool g_softToggle = false;
 static bool g_extrapolating = false;
 
-static bool g_cbfSoftToggle = false;
-
 $on_mod(Loaded) {
   g_softToggle = Mod::get()->getSettingValue<bool>("soft-toggle");
   listenForSettingChanges<bool>("soft-toggle",
                                 [](bool value) { g_softToggle = value; });
 
-  if (auto m = Loader::get()->getLoadedMod("syzzi.click_between_frames")) {
-    g_cbfSoftToggle = m->getSettingValue<bool>("soft-toggle");
-    listenForSettingChanges<bool>(
-        "soft-toggle", [](bool value) { g_cbfSoftToggle = value; }, m);
-  }
+  earlyInputSetup();
 }
 
 static void extrapolatePushButton(PlayerObject *player, PlayerButton button) {
@@ -678,6 +673,15 @@ class $modify(MyBGL, GJBaseGameLayer) {
       return advance;
     };
 
+    // length of one engine step, in the same units as renderAdvanceSeconds() / timeScale.
+    auto renderStepSeconds = [&](double timeScale) -> double {
+      double timeWarp = std::isfinite(m_gameState.m_timeWarp) ? m_gameState.m_timeWarp : 1.0;
+      if (timeWarp <= 0.0) {
+        timeWarp = 1.0;
+      }
+      return (std::min(timeWarp, 1.0) / 240.0) / timeScale;
+    };
+
     auto extrapolatePlayer =
         [&](PlayerObject *player, PlayerState &state,
             const std::vector<PlayerButtonCommand> &pendingClicks,
@@ -824,11 +828,16 @@ class $modify(MyBGL, GJBaseGameLayer) {
           if (hasCBF) {
             bool isTwoPlayer =
                 m_levelSettings && m_levelSettings->m_twoPlayerMode;
-            for (const auto &cmd : m_queuedButtons) {
-              bool isTarget = !cmd.m_isPlayer2 || !isTwoPlayer;
-              if (isTarget && cmd.m_timestamp > state.lastTime &&
-                  cmd.m_timestamp <= tCurrentClamped) {
-                pendingClicks.push_back(cmd);
+            if (!collectEarlyClicks(pendingClicks, tCurrentClamped,
+                                    state.lastTime, dtSeconds,
+                                    renderStepSeconds(timeScale), false,
+                                    isTwoPlayer)) {
+              for (const auto &cmd : m_queuedButtons) {
+                bool isTarget = !cmd.m_isPlayer2 || !isTwoPlayer;
+                if (isTarget && cmd.m_timestamp > state.lastTime &&
+                    cmd.m_timestamp <= tCurrentClamped) {
+                  pendingClicks.push_back(cmd);
+                }
               }
             }
           }
@@ -878,11 +887,16 @@ class $modify(MyBGL, GJBaseGameLayer) {
           if (hasCBF) {
             bool isTwoPlayer =
                 m_levelSettings && m_levelSettings->m_twoPlayerMode;
-            for (const auto &cmd : m_queuedButtons) {
-              bool isTarget = cmd.m_isPlayer2 || !isTwoPlayer;
-              if (isTarget && cmd.m_timestamp > state.lastTime &&
-                  cmd.m_timestamp <= tCurrentClamped) {
-                pendingClicks.push_back(cmd);
+            if (!collectEarlyClicks(pendingClicks, tCurrentClamped,
+                                    state.lastTime, dtSeconds,
+                                    renderStepSeconds(timeScale), true,
+                                    isTwoPlayer)) {
+              for (const auto &cmd : m_queuedButtons) {
+                bool isTarget = cmd.m_isPlayer2 || !isTwoPlayer;
+                if (isTarget && cmd.m_timestamp > state.lastTime &&
+                    cmd.m_timestamp <= tCurrentClamped) {
+                  pendingClicks.push_back(cmd);
+                }
               }
             }
           }
@@ -1193,6 +1207,10 @@ class $modify(MyPlayLayer, PlayLayer) {
   bool init(GJGameLevel *level, bool useReplay, bool dontCreateObjects) {
     if (!PlayLayer::init(level, useReplay, dontCreateObjects))
       return false;
+
+#ifdef GEODE_IS_WINDOWS
+    refreshCbfInputBinds(); // keybinds can change between levels
+#endif
 
     return true;
   }
