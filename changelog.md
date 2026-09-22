@@ -1,3 +1,8 @@
+# 2.4.0
+- PR #14 by @notregoshi:
+  - fix: resolve micro stutter at non-240-divisor refresh rates (90/100/144/165Hz) by sampling unsimulated remainder instead of CPU time
+  - feat(linux): read CBF SHM in fake player for early input fetching to fix inconsistent input delay
+
 # 2.3.6
 - Fixed some levels not working correctly
 
