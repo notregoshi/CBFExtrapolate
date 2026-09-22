@@ -1,5 +1,5 @@
 {
-	"geode": "5.9.0",
+	"geode": "5.10.1",
 	"gd": {
 		"win": "2.2081",
 		"mac": "2.2081",
@@ -35,6 +35,14 @@
 			"description": "Disables CBF Extrapolate features.",
 			"type": "bool",
 			"default": false
+		},
+		"wine-cbf-workaround": {
+			"name": "Wine CBF Workaround",
+			"description": "Read the input CBF's Linux helper captures (its Wine workaround path) so early clicks show in the frame being drawn. Requires Click Between Frames v1.5.0.",
+			"type": "bool",
+			"default": true,
+			"enable-if": "saved:cbf-1-5-0",
+			"enable-if-description": "Requires Click Between Frames v1.5.0"
 		}
 	}
 }
